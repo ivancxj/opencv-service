@@ -1,0 +1,9 @@
+services:
+  archive-opencv-service:
+    image: opencv-service:latest
+    container_name: archive-opencv-service
+    ports:
+      - "8010:8000"
+    restart: always
+    volumes:
+      - ./data:/data
