@@ -1,13 +1,3 @@
-services:
-  archive-opencv-service:
-    image: opencv-service:latest
-    container_name: archive-opencv-service
-    ports:
-      - "8010:8000"
-    restart: always
-    volumes:
-      - ./data:/data
-root@fusionxparkgb10-4036:~/opencv# cat Dockerfile
 FROM python:3.11-slim
 
 WORKDIR /app
