@@ -52,25 +52,106 @@ def calc_blur_score(image) -> float:
 def detect_blank_page(image) -> Dict[str, Any]:
     """
     空白页检测：
-    根据非白色像素占比判断。
+    根据非白像素、深色内容、内容连通区域综合判断。
+
+    这里除了纯白页，还要识别双面扫描里的“透印空白页”：例如背面
+    只扫到上一页盖章/墨迹穿透，页面本身没有正文、表格、页码等有效内容。
     """
     gray = get_gray(image)
+    h, w = gray.shape
 
-    # 大于 245 认为是白色
-    _, binary = cv2.threshold(gray, 245, 255, cv2.THRESH_BINARY)
+    # 去掉最外圈扫描黑边/阴影，避免边框影响空白判断。
+    margin_y = max(1, int(h * 0.02))
+    margin_x = max(1, int(w * 0.02))
+    inner = gray[margin_y:h - margin_y, margin_x:w - margin_x]
+    if inner.size == 0:
+        inner = gray
 
-    total_pixels = binary.size
-    white_pixels = int(np.sum(binary == 255))
-    white_ratio = white_pixels / total_pixels
+    blurred = cv2.GaussianBlur(inner, (3, 3), 0)
 
-    # 非白区域比例
-    content_ratio = 1 - white_ratio
+    total_pixels = blurred.size
+
+    # 245 以下认为不是纸张白底；更低阈值用于区分正文/表格等深色内容。
+    non_white_mask = blurred <= 245
+    medium_mask = blurred <= 225
+    dark_mask = blurred <= 180
+    very_dark_mask = blurred <= 120
+
+    content_ratio = float(np.sum(non_white_mask) / total_pixels)
+    medium_content_ratio = float(np.sum(medium_mask) / total_pixels)
+    dark_content_ratio = float(np.sum(dark_mask) / total_pixels)
+    very_dark_content_ratio = float(np.sum(very_dark_mask) / total_pixels)
+    white_ratio = 1 - content_ratio
+
+    # 统计有意义的内容块。透印/透章页通常只有很少的局部区域；
+    # 正常正文/表格页会有更多分散连通区域或更明显的深色内容。
+    cleaned_mask = (non_white_mask.astype(np.uint8) * 255)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_OPEN, kernel)
+    component_count, largest_region_ratio = content_region_stats(cleaned_mask)
+
+    is_pure_blank = content_ratio < 0.002 and dark_content_ratio < 0.0002
+    is_bleed_through_blank = (
+        not is_pure_blank
+        and content_ratio < 0.015
+        and medium_content_ratio < 0.006
+        and dark_content_ratio < 0.0015
+        and component_count <= 12
+        and largest_region_ratio < 0.012
+    )
+    is_suspected_blank = (
+        not is_pure_blank
+        and not is_bleed_through_blank
+        and content_ratio < 0.025
+        and dark_content_ratio < 0.004
+        and component_count <= 25
+    )
+
+    if is_pure_blank:
+        blank_type = "pure_blank"
+        confidence = "high"
+    elif is_bleed_through_blank:
+        blank_type = "bleed_through_blank"
+        confidence = "medium"
+    elif is_suspected_blank:
+        blank_type = "suspected_blank"
+        confidence = "low"
+    else:
+        blank_type = "content"
+        confidence = "high"
 
     return {
         "white_ratio": round(float(white_ratio), 6),
         "content_ratio": round(float(content_ratio), 6),
-        "is_blank": content_ratio < 0.002
+        "medium_content_ratio": round(float(medium_content_ratio), 6),
+        "dark_content_ratio": round(float(dark_content_ratio), 6),
+        "very_dark_content_ratio": round(float(very_dark_content_ratio), 6),
+        "content_region_count": int(component_count),
+        "largest_region_ratio": round(float(largest_region_ratio), 6),
+        "blank_type": blank_type,
+        "confidence": confidence,
+        "is_blank": is_pure_blank or is_bleed_through_blank
     }
+
+
+def content_region_stats(mask) -> tuple[int, float]:
+    total_pixels = mask.size
+    if total_pixels == 0:
+        return 0, 0.0
+
+    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    min_area = max(20, int(total_pixels * 0.00001))
+    component_count = 0
+    largest_area = 0
+
+    for label in range(1, num_labels):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        component_count += 1
+        largest_area = max(largest_area, area)
+
+    return component_count, float(largest_area / total_pixels)
 
 
 def detect_black_border(image) -> Dict[str, Any]:
